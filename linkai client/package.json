@@ -1,0 +1,111 @@
+{
+  "name": "linkai",
+  "displayName": "LinkAI",
+  "description": "Local developer progress statistics with privacy-conscious AI recommendations",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.137.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:linkai.statistics",
+    "onCommand:linkai.openStatistics",
+    "onCommand:linkai.setBackendToken"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "linkai.openStatistics",
+        "title": "LinkAI: Відкрити статистику"
+      },
+      {
+        "command": "linkai.setBackendToken",
+        "title": "LinkAI: Налаштувати токен AI-бекенду"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "linkai",
+          "title": "LinkAI",
+          "icon": "$(graph-line)"
+        }
+      ]
+    },
+    "views": {
+      "linkai": [
+        {
+          "id": "linkai.statistics",
+          "name": "Статистика"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LinkAI",
+      "properties": {
+        "linkai.backendUrl": {
+          "type": "string",
+          "default": "",
+          "description": "HTTPS URL AI-бекенду (localhost дозволений для розробки)."
+        },
+        "linkai.defaultLanguage": {
+          "type": "string",
+          "enum": ["TypeScript", "JavaScript", "Python", "Java", "C#", "Go", "C++", "Інша"],
+          "default": "TypeScript"
+        },
+        "linkai.defaultPeriod": {
+          "type": "number",
+          "enum": [7, 30, 90],
+          "default": 30
+        },
+        "linkai.includeComments": {
+          "type": "boolean",
+          "default": false,
+          "description": "Враховувати рядки коментарів у нових змінах."
+        },
+        "linkai.sendAggregatedStatistics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Дозволити надсилання агрегованих метрик AI-бекенду. Сирий код не надсилається."
+        },
+        "linkai.excludedPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Фрагменти шляхів, які не слід враховувати у статистиці."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.137.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "typescript-eslint": "^8.61.1",
+    "eslint": "^10.5.0",
+    "typescript": "^6.0.3",
+    "ts-loader": "^9.6.2",
+    "webpack": "^5.107.2",
+    "webpack-cli": "^7.0.3",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
