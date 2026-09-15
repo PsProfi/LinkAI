@@ -5,17 +5,34 @@
 	"tasks": [
 		{
 			"type": "npm",
+			"script": "compile",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": "$tsc"
+		},
+		{
+			"type": "npm",
 			"script": "watch",
-			"problemMatcher": "$ts-webpack-watch",
+			"problemMatcher": {
+				"base": "$ts-webpack-watch",
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": {
+						"regexp": ".*(Compiler starting|Compilation starting|watching the files|File change detected).*"
+					},
+					"endsPattern": {
+						"regexp": ".*(compiled successfully|Failed to compile|Compiler finished).*"
+					}
+				}
+			},
 			"isBackground": true,
 			"presentation": {
 				"reveal": "never",
 				"group": "watchers"
 			},
-			"group": {
-				"kind": "build",
-				"isDefault": true
-			}
+			"group": "build"
 		},
 		{
 			"type": "npm",
