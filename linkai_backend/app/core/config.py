@@ -13,7 +13,9 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # HTTPS & SSL configuration
-    HTTPS_ENABLED: bool = True
+    # За замовчуванням вимикаємо HTTPS для локальної розробки без .env,
+    # щоб VS Code extension міг звертатись до бекенду без self-signed cert issues.
+    HTTPS_ENABLED: bool = False
     SSL_KEYFILE: Optional[str] = None
     SSL_CERTFILE: Optional[str] = None
     SSL_CERT_DIR: str = "certs"

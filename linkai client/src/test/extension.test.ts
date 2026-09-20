@@ -3,6 +3,8 @@ import * as assert from 'assert';
 // You can import and use all API from the 'vscode' module
 // as well as import your extension to test it
 import * as vscode from 'vscode';
+import { countWords } from '../extension';
+import { AiClient } from '../services/aiClient';
 import { collectStatistics, languageForDocument } from '../services/statistics';
 
 suite('Extension Test Suite', () => {
@@ -31,8 +33,46 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(result.dailyActivity.length, 2);
 	});
 
+	test('counts words for the status bar and saved analysis state', () => {
+		assert.strictEqual(countWords('hello world from linkai'), 4);
+		assert.strictEqual(countWords('  hello\n\n world  '), 2);
+		assert.strictEqual(countWords(''), 0);
+	});
+
 	test('maps editor language identifiers', () => {
 		assert.strictEqual(languageForDocument('typescriptreact'), 'TypeScript');
 		assert.strictEqual(languageForDocument('unknown'), 'Інша');
+	});
+
+	test('builds the evaluate endpoint from a local backend base URL', async () => {
+		const calls: string[] = [];
+		const originalFetch = (globalThis as typeof globalThis & { fetch?: typeof fetch }).fetch;
+		(globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = (async (input: string | URL, init?: RequestInit) => {
+			calls.push(String(input));
+			return {
+				ok: true,
+				json: async () => ({
+					score: 82,
+					trend: 'improving',
+					summary: 'Гарний прогрес',
+					strengths: ['Стабільність'],
+					recommendations: ['Працювати регулярно'],
+					confidence: 'medium',
+				}),
+			} as Response;
+		}) as typeof fetch;
+
+		try {
+			const client = new AiClient(async () => 'token-123');
+			await client.evaluate({
+				language: 'TypeScript',
+				periodDays: 30,
+				current: { linesAdded: 100, linesDeleted: 20, linesChanged: 120, activeDays: 5, sessions: 7, averageLinesPerActiveDay: 20 },
+				previous: { linesAdded: 80, linesDeleted: 15, linesChanged: 95, activeDays: 4, sessions: 5, averageLinesPerActiveDay: 20 },
+			}, 'http://localhost:8000');
+			assert.deepStrictEqual(calls, ['http://localhost:8000/api/v1/ai/evaluate']);
+		} finally {
+			(globalThis as typeof globalThis & { fetch?: typeof fetch }).fetch = originalFetch;
+		}
 	});
 });

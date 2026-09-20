@@ -19,7 +19,7 @@
     "commands": [
       {
         "command": "linkai.openStatistics",
-        "title": "LinkAI: Відкрити статистику"
+        "title": "LinkAI: Відкрити налаштування"
       },
       {
         "command": "linkai.setBackendToken",
@@ -31,7 +31,7 @@
         {
           "id": "linkai",
           "title": "LinkAI",
-          "icon": "$(graph-line)"
+          "icon": "$(settings-gear)"
         }
       ]
     },
@@ -39,7 +39,7 @@
       "linkai": [
         {
           "id": "linkai.statistics",
-          "name": "Статистика"
+          "name": "Config"
         }
       ]
     },
@@ -48,7 +48,7 @@
       "properties": {
         "linkai.backendUrl": {
           "type": "string",
-          "default": "",
+          "default": "http://localhost:8000",
           "description": "HTTPS URL AI-бекенду (localhost дозволений для розробки)."
         },
         "linkai.defaultLanguage": {
