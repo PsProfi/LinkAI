@@ -3,6 +3,7 @@ import * as assert from 'assert';
 // You can import and use all API from the 'vscode' module
 // as well as import your extension to test it
 import * as vscode from 'vscode';
+import { evaluateAchievements } from '../services/achievements';
 import { countWords } from '../extension';
 import { AiClient } from '../services/aiClient';
 import { collectStatistics, languageForDocument } from '../services/statistics';
@@ -42,6 +43,12 @@ suite('Extension Test Suite', () => {
 	test('maps editor language identifiers', () => {
 		assert.strictEqual(languageForDocument('typescriptreact'), 'TypeScript');
 		assert.strictEqual(languageForDocument('unknown'), 'Інша');
+	});
+
+	test('evaluates simple achievements independently from the tracker', () => {
+		const achievements = evaluateAchievements({ words: 200, linesAdded: 100, linesDeleted: 25, activeDays: 7, sessions: 5 });
+		assert.strictEqual(achievements.length, 4);
+		assert.ok(achievements.every((achievement) => achievement.earned));
 	});
 
 	test('builds the evaluate endpoint from a local backend base URL', async () => {

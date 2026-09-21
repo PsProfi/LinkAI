@@ -39,7 +39,8 @@
       "linkai": [
         {
           "id": "linkai.statistics",
-          "name": "Config"
+          "name": "Config",
+          "type": "webview"
         }
       ]
     },
@@ -70,6 +71,16 @@
           "type": "boolean",
           "default": false,
           "description": "Дозволити надсилання агрегованих метрик AI-бекенду. Сирий код не надсилається."
+        },
+        "linkai.enableDataProcessing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Дозволити локальну обробку змін для статистики."
+        },
+        "linkai.enableAchievements": {
+          "type": "boolean",
+          "default": true,
+          "description": "Показувати досягнення на основі локальної статистики."
         },
         "linkai.excludedPaths": {
           "type": "array",

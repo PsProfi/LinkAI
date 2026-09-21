@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AiClient } from './services/aiClient';
+import { Achievement, evaluateAchievements } from './services/achievements';
 import { AnalysisResult } from './types/messages';
 import { supportedLanguages } from './types/statistics';
 
@@ -25,13 +26,23 @@ const MAX_LINES_PER_EVENT = 15;
 type Settings = {
 	backendUrl: string;
 	defaultLanguage: string;
+	defaultPeriod: 7 | 30 | 90;
+	includeComments: boolean;
 	sendAggregatedStatistics: boolean;
+	enableDataProcessing: boolean;
+	enableAchievements: boolean;
+	excludedPaths: string[];
 };
 
 const DEFAULT_SETTINGS: Settings = {
 	backendUrl: 'http://localhost:8000',
 	defaultLanguage: 'TypeScript',
+	defaultPeriod: 30,
+	includeComments: false,
 	sendAggregatedStatistics: false,
+	enableDataProcessing: true,
+	enableAchievements: true,
+	excludedPaths: [],
 };
 
 interface FileDayStats { words: number; linesAdded: number; linesDeleted: number; }
@@ -64,6 +75,7 @@ interface PanelState {
 	previous: PeriodSummary;
 	languages: LanguageActivity[];
 	files: FileActivity[];
+	achievements: Achievement[];
 	lastAnalysis?: AnalysisResult;
 }
 
@@ -123,12 +135,22 @@ function getStoredSettings(context: vscode.ExtensionContext): Settings {
 	const configuration = vscode.workspace.getConfiguration('linkai');
 	const backendUrl = context.globalState.get<string>('linkai.backendUrl', configuration.get<string>('backendUrl', DEFAULT_SETTINGS.backendUrl) ?? DEFAULT_SETTINGS.backendUrl);
 	const defaultLanguage = context.globalState.get<string>('linkai.defaultLanguage', configuration.get<string>('defaultLanguage', DEFAULT_SETTINGS.defaultLanguage) ?? DEFAULT_SETTINGS.defaultLanguage);
+	const defaultPeriod = context.globalState.get<number>('linkai.defaultPeriod', configuration.get<number>('defaultPeriod', DEFAULT_SETTINGS.defaultPeriod) ?? DEFAULT_SETTINGS.defaultPeriod);
+	const includeComments = context.globalState.get<boolean>('linkai.includeComments', configuration.get<boolean>('includeComments', DEFAULT_SETTINGS.includeComments));
 	const sendAggregatedStatistics = context.globalState.get<boolean>('linkai.sendAggregatedStatistics', configuration.get<boolean>('sendAggregatedStatistics', DEFAULT_SETTINGS.sendAggregatedStatistics));
+	const enableDataProcessing = context.globalState.get<boolean>('linkai.enableDataProcessing', configuration.get<boolean>('enableDataProcessing', DEFAULT_SETTINGS.enableDataProcessing));
+	const enableAchievements = context.globalState.get<boolean>('linkai.enableAchievements', configuration.get<boolean>('enableAchievements', DEFAULT_SETTINGS.enableAchievements));
+	const excludedPaths = context.globalState.get<string[]>('linkai.excludedPaths', configuration.get<string[]>('excludedPaths', DEFAULT_SETTINGS.excludedPaths)) ?? DEFAULT_SETTINGS.excludedPaths;
 
 	return {
 		backendUrl: backendUrl.trim() || DEFAULT_SETTINGS.backendUrl,
 		defaultLanguage: supportedLanguages.includes(defaultLanguage as typeof supportedLanguages[number]) ? defaultLanguage : DEFAULT_SETTINGS.defaultLanguage,
+		defaultPeriod: defaultPeriod === 7 || defaultPeriod === 90 ? defaultPeriod : DEFAULT_SETTINGS.defaultPeriod,
+		includeComments: Boolean(includeComments),
 		sendAggregatedStatistics: Boolean(sendAggregatedStatistics),
+		enableDataProcessing: Boolean(enableDataProcessing),
+		enableAchievements: Boolean(enableAchievements),
+		excludedPaths: Array.isArray(excludedPaths) ? excludedPaths.filter((path) => typeof path === 'string' && path.trim()).map((path) => path.trim()) : [],
 	};
 }
 
@@ -136,10 +158,20 @@ async function saveStoredSettings(context: vscode.ExtensionContext, settings: Se
 	await Promise.all([
 		context.globalState.update('linkai.backendUrl', settings.backendUrl),
 		context.globalState.update('linkai.defaultLanguage', settings.defaultLanguage),
+		context.globalState.update('linkai.defaultPeriod', settings.defaultPeriod),
+		context.globalState.update('linkai.includeComments', settings.includeComments),
 		context.globalState.update('linkai.sendAggregatedStatistics', settings.sendAggregatedStatistics),
+		context.globalState.update('linkai.enableDataProcessing', settings.enableDataProcessing),
+		context.globalState.update('linkai.enableAchievements', settings.enableAchievements),
+		context.globalState.update('linkai.excludedPaths', settings.excludedPaths),
 		vscode.workspace.getConfiguration('linkai').update('backendUrl', settings.backendUrl, vscode.ConfigurationTarget.Global),
 		vscode.workspace.getConfiguration('linkai').update('defaultLanguage', settings.defaultLanguage, vscode.ConfigurationTarget.Global),
+		vscode.workspace.getConfiguration('linkai').update('defaultPeriod', settings.defaultPeriod, vscode.ConfigurationTarget.Global),
+		vscode.workspace.getConfiguration('linkai').update('includeComments', settings.includeComments, vscode.ConfigurationTarget.Global),
 		vscode.workspace.getConfiguration('linkai').update('sendAggregatedStatistics', settings.sendAggregatedStatistics, vscode.ConfigurationTarget.Global),
+		vscode.workspace.getConfiguration('linkai').update('enableDataProcessing', settings.enableDataProcessing, vscode.ConfigurationTarget.Global),
+		vscode.workspace.getConfiguration('linkai').update('enableAchievements', settings.enableAchievements, vscode.ConfigurationTarget.Global),
+		vscode.workspace.getConfiguration('linkai').update('excludedPaths', settings.excludedPaths, vscode.ConfigurationTarget.Global),
 	]);
 }
 
@@ -192,10 +224,15 @@ interface ChangeScore {
  *  - Multi-word insertions (paste, snippet, multi-line completion): meaningful lines and their words.
  *  - Deleted lines = line breaks inside the replaced range.
  */
+function isCommentLine(line: string): boolean {
+	return /^(\/\/|#|\/\*|\*|\*\/|--|<!--)/.test(line.trim());
+}
+
 function scoreChange(
 	change: vscode.TextDocumentContentChangeEvent,
 	doc: vscode.TextDocument,
 	singleChange: boolean,
+	includeComments: boolean,
 ): ChangeScore {
 	const text = change.text;
 	const result: ChangeScore = {
@@ -210,7 +247,7 @@ function scoreChange(
 	if (/^\s+$/.test(text)) {
 		if (!singleChange || change.rangeLength > 0 || change.range.start.character === 0) { return result; }
 		const before = doc.lineAt(change.range.start.line).text.slice(0, change.range.start.character);
-		if (isMeaningfulLine(before)) {
+		if (isMeaningfulLine(before) && (includeComments || !isCommentLine(before))) {
 			if (/\S$/.test(before)) { result.words = 1; }
 			if (text.includes('\n')) { result.lines = 1; }
 		}
@@ -221,7 +258,7 @@ function scoreChange(
 	if (!/\s/.test(text.trim())) { return result; }
 
 	const newlines = (text.match(/\n/g) || []).length;
-	const meaningfulLines = text.split(/\r?\n/).filter(isMeaningfulLine);
+	const meaningfulLines = text.split(/\r?\n/).filter((line) => isMeaningfulLine(line) && (includeComments || !isCommentLine(line)));
 	result.isPaste = text.length > PASTE_THRESHOLD_CHARS && newlines > 1;
 	result.words = meaningfulLines.reduce((sum, line) => sum + countWords(line), 0);
 	result.lines = newlines > 0 ? meaningfulLines.length : 0;
@@ -274,10 +311,14 @@ class WritingTracker implements vscode.Disposable {
 	}
 
 	public handleChange(event: vscode.TextDocumentChangeEvent): void {
+		const settings = getStoredSettings(this.context);
+		if (!settings.enableDataProcessing) { return; }
 		const doc = event.document;
 		if (doc.uri.scheme !== 'file') { return; }
 		const ext = fileExtension(doc.fileName).toLowerCase();
 		if (!CODE_EXTENSIONS.has(ext)) { return; }
+		const relativePath = vscode.workspace.asRelativePath(doc.uri, false).toLowerCase();
+		if (settings.excludedPaths.some((path) => relativePath.includes(path.toLowerCase()))) { return; }
 
 		// Undo / Redo are not new writing (TextDocumentChangeReason: Undo = 1, Redo = 2)
 		const reason = (event as { reason?: number }).reason;
@@ -287,7 +328,7 @@ class WritingTracker implements vscode.Disposable {
 		let recorded = false;
 
 		for (const change of event.contentChanges) {
-			const score = scoreChange(change, doc, singleChange);
+			const score = scoreChange(change, doc, singleChange, settings.includeComments);
 			const factor = score.isPaste ? PASTE_MULTIPLIER : 1;
 			const words = Math.floor(Math.min(score.words * factor, MAX_WORDS_PER_EVENT));
 			const lines = Math.floor(Math.min(score.lines * factor, MAX_LINES_PER_EVENT));
@@ -404,14 +445,14 @@ class WritingTracker implements vscode.Disposable {
 // ─────────────────────────────────────────────
 
 /** Summary of PERIOD_DAYS days, ending `offsetDays` days ago (0 = current period, PERIOD_DAYS = previous one). */
-function summarizePeriod(history: History, offsetDays: number): PeriodSummary {
+function summarizePeriod(history: History, offsetDays: number, periodDays = PERIOD_DAYS): PeriodSummary {
 	let words = 0;
 	let linesAdded = 0;
 	let linesDeleted = 0;
 	let sessions = 0;
 	let activeDays = 0;
 
-	for (let i = offsetDays; i < offsetDays + PERIOD_DAYS; i++) {
+	for (let i = offsetDays; i < offsetDays + periodDays; i++) {
 		const day = history[dayKey(daysAgo(i))];
 		if (!day) { continue; }
 		words += day.words;
@@ -482,12 +523,12 @@ function toAiSummary(period: PeriodSummary) {
 // ANALYSIS (built from tracked data)
 // ─────────────────────────────────────────────
 
-function buildLocalAnalysis(current: PeriodSummary, previous: PeriodSummary, files: FileActivity[]): AnalysisResult {
+function buildLocalAnalysis(current: PeriodSummary, previous: PeriodSummary, files: FileActivity[], periodDays = PERIOD_DAYS): AnalysisResult {
 	const noActivity = current.words === 0 && current.linesAdded === 0 && current.linesDeleted === 0;
 	if (noActivity) {
 		return {
 			score: 10,
-			summary: `За останні ${PERIOD_DAYS} днів розширення не зафіксувало змін у коді. Пишіть код у відкритих файлах — дані збираються автоматично.`,
+			summary: `За останні ${periodDays} днів розширення не зафіксувало змін у коді. Пишіть код у відкритих файлах — дані збираються автоматично.`,
 			strengths: ['Відстеження активне й чекає на ваші зміни.'],
 			recommendations: ['Попрацюйте з кодом кілька днів і повторіть аналіз.'],
 			confidence: 'low',
@@ -516,7 +557,7 @@ function buildLocalAnalysis(current: PeriodSummary, previous: PeriodSummary, fil
 
 	const strengths: string[] = [];
 	if (current.activeDays >= 12) {
-		strengths.push(`Стабільна практика: ${current.activeDays} активних днів із ${PERIOD_DAYS}.`);
+		strengths.push(`Стабільна практика: ${current.activeDays} активних днів із ${periodDays}.`);
 	}
 	if (ratio !== undefined && ratio >= 1.1) {
 		strengths.push(`Активність зросла на ${changePercent}% порівняно з попередніми ${PERIOD_DAYS} днями.`);
@@ -562,7 +603,7 @@ function buildLocalAnalysis(current: PeriodSummary, previous: PeriodSummary, fil
 
 	return {
 		score,
-		summary: `За останні ${PERIOD_DAYS} днів: ${current.activeDays} активних днів, ${current.sessions} сесій, +${current.linesAdded} / −${current.linesDeleted} рядків. ${trendText}`,
+		summary: `За останні ${periodDays} днів: ${current.activeDays} активних днів, ${current.sessions} сесій, +${current.linesAdded} / −${current.linesDeleted} рядків. ${trendText}`,
 		strengths: strengths.slice(0, 3),
 		recommendations: recommendations.slice(0, 3),
 		confidence: current.activeDays >= 10 ? 'high' : current.activeDays >= 4 ? 'medium' : 'low',
@@ -572,9 +613,9 @@ function buildLocalAnalysis(current: PeriodSummary, previous: PeriodSummary, fil
 async function buildAnalysis(context: vscode.ExtensionContext, tracker: WritingTracker): Promise<AnalysisResult> {
 	const settings = getStoredSettings(context);
 	const history = tracker.getHistory();
-	const current = summarizePeriod(history, 0);
-	const previous = summarizePeriod(history, PERIOD_DAYS);
-	const local = buildLocalAnalysis(current, previous, topFiles(history));
+	const current = summarizePeriod(history, 0, settings.defaultPeriod);
+	const previous = summarizePeriod(history, settings.defaultPeriod, settings.defaultPeriod);
+	const local = buildLocalAnalysis(current, previous, topFiles(history), settings.defaultPeriod);
 
 	const hasActivity = current.words > 0 || current.linesAdded > 0 || current.linesDeleted > 0;
 	if (!hasActivity || !settings.sendAggregatedStatistics || !settings.backendUrl.trim()) {
@@ -586,7 +627,7 @@ async function buildAnalysis(context: vscode.ExtensionContext, tracker: WritingT
 		const aiClient = new AiClient(() => context.secrets.get('linkai.backendToken'));
 		const remote = await aiClient.evaluate({
 			language: pickLanguage(history, settings.defaultLanguage),
-			periodDays: PERIOD_DAYS,
+			periodDays: settings.defaultPeriod,
 			current: toAiSummary(current),
 			previous: toAiSummary(previous),
 		}, settings.backendUrl);
@@ -611,13 +652,16 @@ async function buildAnalysis(context: vscode.ExtensionContext, tracker: WritingT
 
 function buildPanelState(context: vscode.ExtensionContext, tracker: WritingTracker): PanelState {
 	const history = tracker.getHistory();
+	const settings = getStoredSettings(context);
+	const current = summarizePeriod(history, 0, settings.defaultPeriod);
 	return {
-		settings: getStoredSettings(context),
+		settings,
 		session: tracker.getSessionStats(),
-		current: summarizePeriod(history, 0),
-		previous: summarizePeriod(history, PERIOD_DAYS),
+		current,
+		previous: summarizePeriod(history, settings.defaultPeriod, settings.defaultPeriod),
 		languages: topLanguages(history).slice(0, 5),
 		files: topFiles(history).slice(0, 5),
+		achievements: settings.enableAchievements ? evaluateAchievements(current) : [],
 		lastAnalysis: context.globalState.get<AnalysisResult>(LAST_ANALYSIS_KEY),
 	};
 }
@@ -640,7 +684,12 @@ function createController(context: vscode.ExtensionContext, tracker: WritingTrac
 				const settings: Settings = {
 					backendUrl: message.payload.backendUrl.trim() || DEFAULT_SETTINGS.backendUrl,
 					defaultLanguage: supportedLanguages.includes(message.payload.defaultLanguage as typeof supportedLanguages[number]) ? message.payload.defaultLanguage : DEFAULT_SETTINGS.defaultLanguage,
+					defaultPeriod: message.payload.defaultPeriod === 7 || message.payload.defaultPeriod === 90 ? message.payload.defaultPeriod : DEFAULT_SETTINGS.defaultPeriod,
+					includeComments: Boolean(message.payload.includeComments),
 					sendAggregatedStatistics: Boolean(message.payload.sendAggregatedStatistics),
+					enableDataProcessing: Boolean(message.payload.enableDataProcessing),
+					enableAchievements: Boolean(message.payload.enableAchievements),
+					excludedPaths: Array.isArray(message.payload.excludedPaths) ? message.payload.excludedPaths.filter((path) => typeof path === 'string' && path.trim()).map((path) => path.trim()) : [],
 				};
 				await saveStoredSettings(context, settings);
 				send({ type: 'settingsSaved', payload: settings });
@@ -891,6 +940,33 @@ function baseStyles(): string {
 		.stat-value { font-size: 24px; font-weight: 700; margin: 4px 0 2px; color: var(--primary-soft); }
 		.stat-sub { font-size: 11px; color: var(--muted); }
 		.columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 16px; }
+		.tabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+		.tab {
+			padding: 9px 12px;
+			border: 0;
+			border-bottom: 2px solid transparent;
+			border-radius: 0;
+			background: transparent;
+			color: var(--muted);
+		}
+		.tab.active { border-bottom-color: var(--accent); color: var(--text); }
+		.tab-panel[hidden] { display: none; }
+		.achievements-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+		.achievement {
+			position: relative;
+			min-height: 128px;
+			padding: 16px;
+			border: 1px solid rgba(125, 211, 252, 0.22);
+			border-radius: 10px;
+			background: linear-gradient(145deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.72));
+		}
+		.achievement.earned { border-color: rgba(125, 211, 252, 0.7); box-shadow: 0 10px 24px rgba(14, 116, 144, 0.14); }
+		.achievement.locked { opacity: 0.62; }
+		.achievement-mark { color: var(--accent); font-size: 20px; line-height: 1; }
+		.achievement.locked .achievement-mark { color: var(--muted); }
+		.achievement-title { margin: 12px 0 5px; font-size: 14px; font-weight: 700; }
+		.achievement-description { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+		.achievement-empty { color: var(--muted); margin: 0; }
 		.list { list-style: none; margin: 0; padding: 0; }
 		.list li {
 			display: flex;
@@ -939,7 +1015,12 @@ function getConfigHtml(): string {
 		const vscode = acquireVsCodeApi();
 		const backendUrl = document.getElementById('backendUrl');
 		const defaultLanguage = document.getElementById('defaultLanguage');
+		const defaultPeriod = document.getElementById('defaultPeriod');
+		const includeComments = document.getElementById('includeComments');
 		const sendAggregatedStatistics = document.getElementById('sendAggregatedStatistics');
+		const enableDataProcessing = document.getElementById('enableDataProcessing');
+		const enableAchievements = document.getElementById('enableAchievements');
+		const excludedPaths = document.getElementById('excludedPaths');
 		const status = document.getElementById('status');
 
 		window.addEventListener('message', function (event) {
@@ -949,7 +1030,12 @@ function getConfigHtml(): string {
 				const settings = (message.payload && message.payload.settings) || {};
 				backendUrl.value = settings.backendUrl || 'http://localhost:8000';
 				defaultLanguage.value = settings.defaultLanguage || 'TypeScript';
+				defaultPeriod.value = String(settings.defaultPeriod || 30);
+				includeComments.checked = Boolean(settings.includeComments);
 				sendAggregatedStatistics.checked = Boolean(settings.sendAggregatedStatistics);
+				enableDataProcessing.checked = settings.enableDataProcessing !== false;
+				enableAchievements.checked = settings.enableAchievements !== false;
+			excludedPaths.value = (settings.excludedPaths || []).join(', ');
 			}
 			if (message.type === 'settingsSaved') {
 				status.textContent = 'Конфігурацію збережено';
@@ -960,7 +1046,12 @@ function getConfigHtml(): string {
 			vscode.postMessage({ type: 'saveSettings', payload: {
 				backendUrl: backendUrl.value,
 				defaultLanguage: defaultLanguage.value,
+				defaultPeriod: Number(defaultPeriod.value),
+				includeComments: includeComments.checked,
 				sendAggregatedStatistics: sendAggregatedStatistics.checked,
+				enableDataProcessing: enableDataProcessing.checked,
+				enableAchievements: enableAchievements.checked,
+				excludedPaths: excludedPaths.value.split(',').map(function (path) { return path.trim(); }).filter(Boolean),
 			} });
 		});
 
@@ -1000,7 +1091,18 @@ function getConfigHtml(): string {
 					${supportedLanguages.map((language) => `<option value="${language}">${language}</option>`).join('')}
 				</select>
 			</div>
+			<div class="input">
+				<label for="defaultPeriod">Період статистики</label>
+				<select id="defaultPeriod"><option value="7">7 днів</option><option value="30">30 днів</option><option value="90">90 днів</option></select>
+			</div>
+			<label class="checkbox"><input id="enableDataProcessing" type="checkbox" /> Дозволити обробку даних</label>
+			<label class="checkbox"><input id="includeComments" type="checkbox" /> Враховувати рядки коментарів</label>
 			<label class="checkbox"><input id="sendAggregatedStatistics" type="checkbox" /> Дозволити надсилання агрегованої статистики</label>
+			<label class="checkbox"><input id="enableAchievements" type="checkbox" /> Увімкнути досягнення</label>
+			<div class="input">
+				<label for="excludedPaths">Виключені фрагменти шляхів</label>
+				<input id="excludedPaths" type="text" placeholder="node_modules, generated" />
+			</div>
 			<div class="note">Надсилаються лише числа (рядки, дні, сесії) та мова. Код і назви файлів залишаються на вашому комп'ютері. Вимкнено — аналіз виконується локально.</div>
 			<button id="saveConfig" class="primary" type="button">Зберегти конфіг</button>
 			<div class="note" id="status"></div>
@@ -1048,6 +1150,26 @@ function getAnalysisHtml(): string {
 			}
 			el.innerHTML = items.map(function (item) { return '<li>' + format(item) + '</li>'; }).join('');
 		}
+		function renderAchievements(items) {
+			const el = document.getElementById('achievements');
+			const earned = (items || []).filter(function (achievement) { return achievement.earned; }).length;
+			setText('achievementProgress', earned + ' / ' + (items || []).length + ' відкрито');
+			if (!items || !items.length) {
+				el.innerHTML = '<p class="achievement-empty">Досягнення вимкнені в налаштуваннях.</p>';
+				return;
+			}
+			el.innerHTML = items.map(function (achievement) {
+				return '<article class="achievement ' + (achievement.earned ? 'earned' : 'locked') + '" aria-label="' + esc(achievement.title) + '">' +
+					'<div class="achievement-mark">' + (achievement.earned ? '✓' : '○') + '</div>' +
+					'<h3 class="achievement-title">' + esc(achievement.title) + '</h3>' +
+					'<p class="achievement-description">' + esc(achievement.description) + '</p>' +
+				'</article>';
+			}).join('');
+		}
+		function selectTab(tabId) {
+			document.querySelectorAll('.tab').forEach(function (tab) { tab.classList.toggle('active', tab.dataset.tab === tabId); });
+			document.querySelectorAll('.tab-panel').forEach(function (panel) { panel.hidden = panel.id !== tabId; });
+		}
 		function renderAnalysis(payload) {
 			if (!payload) return;
 			const strengths = (payload.strengths || []).map(function (item) { return '<li>' + esc(item) + '</li>'; }).join('');
@@ -1078,6 +1200,7 @@ function getAnalysisHtml(): string {
 			renderList('files', state.files, function (f) {
 				return '<span class="path" title="' + esc(f.path) + '">' + esc(f.path) + '</span><span>+' + fmt(f.linesAdded) + ' / −' + fmt(f.linesDeleted) + '</span>';
 			});
+			renderAchievements(state.achievements);
 			document.getElementById('emptyHint').hidden = (c.words > 0 || c.linesAdded > 0 || c.linesDeleted > 0);
 			if (firstState) {
 				firstState = false;
@@ -1108,6 +1231,9 @@ function getAnalysisHtml(): string {
 		runButton.addEventListener('click', function () {
 			vscode.postMessage({ type: 'runAnalysis' });
 		});
+		document.querySelectorAll('.tab').forEach(function (tab) {
+			tab.addEventListener('click', function () { selectTab(tab.dataset.tab); });
+		});
 
 		vscode.postMessage({ type: 'requestState' });
 	`;
@@ -1131,24 +1257,37 @@ function getAnalysisHtml(): string {
 		</header>
 
 		<section class="panel">
-			<h2>Відстежені зміни</h2>
-			<div class="stats">
-				<div class="stat"><div class="stat-label">Слів за сесію</div><div class="stat-value" id="sessionWords">0</div><div class="stat-sub" id="sessionWordsSub"></div></div>
-				<div class="stat"><div class="stat-label">Додано рядків, 30 днів</div><div class="stat-value" id="linesAdded">0</div><div class="stat-sub" id="linesAddedSub"></div></div>
-				<div class="stat"><div class="stat-label">Видалено рядків, 30 днів</div><div class="stat-value" id="linesDeleted">0</div><div class="stat-sub" id="linesDeletedSub"></div></div>
-				<div class="stat"><div class="stat-label">Активних днів</div><div class="stat-value" id="activeDays">0 / 30</div><div class="stat-sub" id="activeDaysSub"></div></div>
-			</div>
-			<div class="columns">
-				<div>
-					<h2>Мови</h2>
-					<ul class="list" id="languages"></ul>
+			<nav class="tabs" aria-label="Розділи аналізу">
+				<button class="tab active" type="button" data-tab="overviewTab">Огляд</button>
+				<button class="tab" type="button" data-tab="achievementsTab">Досягнення</button>
+			</nav>
+			<div class="tab-panel" id="overviewTab">
+				<h2>Відстежені зміни</h2>
+				<div class="stats">
+					<div class="stat"><div class="stat-label">Слів за сесію</div><div class="stat-value" id="sessionWords">0</div><div class="stat-sub" id="sessionWordsSub"></div></div>
+					<div class="stat"><div class="stat-label">Додано рядків, 30 днів</div><div class="stat-value" id="linesAdded">0</div><div class="stat-sub" id="linesAddedSub"></div></div>
+					<div class="stat"><div class="stat-label">Видалено рядків, 30 днів</div><div class="stat-value" id="linesDeleted">0</div><div class="stat-sub" id="linesDeletedSub"></div></div>
+					<div class="stat"><div class="stat-label">Активних днів</div><div class="stat-value" id="activeDays">0 / 30</div><div class="stat-sub" id="activeDaysSub"></div></div>
 				</div>
-				<div>
-					<h2>Найактивніші файли</h2>
-					<ul class="list" id="files"></ul>
+				<div class="columns">
+					<div>
+						<h2>Мови</h2>
+						<ul class="list" id="languages"></ul>
+					</div>
+					<div>
+						<h2>Найактивніші файли</h2>
+						<ul class="list" id="files"></ul>
+					</div>
 				</div>
+				<p class="note" id="emptyHint" hidden>Змін ще не зафіксовано. Пишіть код у відкритих файлах — розширення відстежує їх автоматично, дані з'являться тут за кілька секунд.</p>
 			</div>
-			<p class="note" id="emptyHint" hidden>Змін ще не зафіксовано. Пишіть код у відкритих файлах — розширення відстежує їх автоматично, дані з'являться тут за кілька секунд.</p>
+			<div class="tab-panel" id="achievementsTab" hidden>
+				<div class="row" style="margin-top:0; justify-content:space-between; align-items:baseline">
+					<h2 style="margin-bottom:0">Досягнення</h2>
+					<span class="note" id="achievementProgress">0 / 0 відкрито</span>
+				</div>
+				<div class="achievements-grid" id="achievements" style="margin-top:14px"></div>
+			</div>
 		</section>
 
 		<section class="panel">
